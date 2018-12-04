@@ -55,7 +55,11 @@ class Node {
   }
 
   enum class Type { kOperation, kVariable };
+#if !defined(_WIN32)  // msvc not support constexpr correctly.
   static constexpr char kControlDepVarName[] = "__control_var";
+#else
+  static const char kControlDepVarName[];
+#endif
 
   Type NodeType() const { return type_; }
 
@@ -104,6 +108,18 @@ class Node {
            Name().find(ir::Node::kControlDepVarName) != std::string::npos;
   }
 
+  // RuntimeHasAttr is different with HasAttr now.
+  // 1. For Op()->HasAttr(), it judges whether a stored program_desc_ has attr,
+  // thus, if stored program_desc_ are old which don't have an attr, a new
+  // library which adds the attr already will fail on this function.
+  // Details:
+  // https://github.com/PaddlePaddle/Paddle/pull/14608#issuecomment-442309087
+  // 2. For Op()->RuntimeHasAttr, it judges the attr in runtime to avoid above
+  // problem.
+  // TODO(luotao): Maybe we should enhance HasAttr later, instead of adding
+  // RuntimeHasAttr.
+  bool RuntimeHasAttr(const std::string& name) const;
+
   std::vector<Node*> inputs;
   std::vector<Node*> outputs;
 
@@ -115,36 +131,29 @@ class Node {
   int id_;
 
  private:
+  // ID can only set by a Graph.
+  void SetId(int id) { id_ = id; }
+
   friend class Graph;
   friend std::unique_ptr<Node> CreateNodeForTest(const std::string& name,
                                                  Node::Type type);
 
   explicit Node(const std::string& name, Type type)
-      : name_(name),
-        var_desc_(nullptr),
-        op_desc_(nullptr),
-        type_(type),
-        id_(count_++) {}
+      : name_(name), var_desc_(nullptr), op_desc_(nullptr), type_(type) {}
 
   explicit Node(VarDesc* var_desc)
       : name_(var_desc->Name()),
         var_desc_(new VarDesc(*var_desc)),
         op_desc_(nullptr),
-        type_(Type::kVariable),
-        id_(count_++) {}
+        type_(Type::kVariable) {}
 
   explicit Node(OpDesc* op_desc)
       : name_(op_desc->Type()),
         var_desc_(nullptr),
         op_desc_(new OpDesc(*op_desc, op_desc->Block())),
-        type_(Type::kOperation),
-        id_(count_++) {}
+        type_(Type::kOperation) {}
 
   Node() = delete;
-
-  static int count_;
-  // Please don't use this API or make this public.
-  static void ResetId() { count_ = 0; }
 
   boost::any wrapper_;
   std::function<void(void)> wrapper_deleter_;

@@ -373,9 +373,8 @@ class TestL2Decay(TranspilerTest):
         self.assertEqual(len(pserver.blocks), 3)
         self.assertEqual([op.type for op in pserver.blocks[1].ops],
                          ["sum", "scale", "clip", "sgd"])
-        self.assertEqual(
-            [op.type for op in pserver.blocks[2].ops],
-            ["sum", "scale", "clip", "scale", "elementwise_add", "sgd"])
+        self.assertEqual([op.type for op in pserver.blocks[2].ops],
+                         ["sum", "scale", "clip", "scale", "sum", "sgd"])
         # TODO(typhoonzero): test clipping and L2Decay ops are removed from trainer
 
 
@@ -416,12 +415,10 @@ class TestL2DecayWithPiecewise(TranspilerTest):
             "logical_and", "conditional_block", "fill_constant",
             "conditional_block"
         ])
-        self.assertEqual(
-            [op.type for op in pserver.blocks[7].ops],
-            ["sum", "scale", "scale", "elementwise_add", "momentum"])
-        self.assertEqual(
-            [op.type for op in pserver.blocks[8].ops],
-            ["sum", "scale", "scale", "elementwise_add", "momentum"])
+        self.assertEqual([op.type for op in pserver.blocks[7].ops],
+                         ["sum", "scale", "scale", "sum", "momentum"])
+        self.assertEqual([op.type for op in pserver.blocks[8].ops],
+                         ["sum", "scale", "scale", "sum", "momentum"])
 
 
 class TestEmptyPserverOptimizeBlocks(TranspilerTest):
@@ -570,7 +567,6 @@ class TestDistLookupTable(TestDistLookupTableBase):
             'fill_constant', 'fill_constant', 'fill_constant', 'fill_constant',
             'fill_constant', 'fill_constant', 'fill_constant', 'fill_constant',
             'fill_constant', 'fill_constant', 'fill_constant', 'fill_constant',
-            'fill_constant', 'fill_constant', 'fill_constant', 'fill_constant',
             'fill_constant', 'fill_constant', 'uniform_random',
             'uniform_random', 'recv', 'recv', 'recv', 'fetch_barrier', 'concat',
             'fake_init'
@@ -642,7 +638,7 @@ class TestAsyncDistLookupTable(TestDistLookupTableBase):
         # 5 save table
         self.assertEqual([op.type for op in pserver1.blocks[5].ops], ["save"])
 
-        trainer, _ = self.get_trainer(config)
+        trainer, trainer_startup = self.get_trainer(config)
         self.assertEqual(len(trainer.blocks), 1)
         ops = [
             'split_ids', 'prefetch', 'merge_ids', 'sequence_pool',
@@ -656,6 +652,16 @@ class TestAsyncDistLookupTable(TestDistLookupTableBase):
             'recv', 'concat'
         ]
         self.assertEqual([op.type for op in trainer.blocks[0].ops], ops)
+        startup_ops = [
+            'fill_constant', 'fill_constant', 'fill_constant', 'fill_constant',
+            'fill_constant', 'fill_constant', 'fill_constant', 'fill_constant',
+            'fill_constant', 'fill_constant', 'fill_constant', 'fill_constant',
+            'fill_constant', 'fill_constant', 'uniform_random',
+            'uniform_random', 'recv', 'recv', 'recv', 'fetch_barrier', 'concat',
+            'fake_init'
+        ]
+        self.assertEqual([op.type for op in trainer_startup.blocks[0].ops],
+                         startup_ops)
 
 
 class TestDistLookupTableSliceSize(TestDistLookupTableBase):
@@ -774,6 +780,47 @@ class TestNCCL2Transpile(TranspilerTest):
             self.assertIsNotNone(startup.global_block().vars.get("NCCLID"))
         else:
             pass
+
+
+# test for remote prefetch
+class TestRemoteLookupTable(TestDistLookupTableBase):
+    def net_conf(self):
+        import os
+        os.environ['PADDLE_ENABLE_REMOTE_PREFETCH'] = "1"
+        self.network_with_table(is_sparse=True, is_distributed=False)
+
+    def transpiler_test_impl(self):
+        pserver1, startup1 = self.get_pserver(self.pserver1_ep)
+
+        self.assertEqual(len(pserver1.blocks), 4)
+        # 0 listen_and_serv
+        # 1 optimize for fc_w or fc_b adam
+        self.assertEqual([op.type for op in pserver1.blocks[1].ops],
+                         ["sum", "scale", "adam", "scale", "scale"])
+        # 2 optimize for table adam
+        # NOTE: if param is not selected rows, the grad will scaled to grad / trainer_num
+        self.assertEqual([op.type for op in pserver1.blocks[2].ops],
+                         ["sum", "scale", "adam", "scale", "scale"])
+
+        # 3 optimize for table 2 adam
+        # NOTE: if param is not selected rows, the grad will scaled to grad / trainer_num
+        self.assertEqual([op.type for op in pserver1.blocks[3].ops],
+                         ["sum", "scale", "adam", "scale", "scale"])
+
+        trainer, _ = self.get_trainer()
+        self.assertEqual(len(trainer.blocks), 1)
+        ops = [
+            'lookup_table', 'sequence_pool', 'lookup_table', 'sequence_pool',
+            'lookup_table', 'sequence_pool', 'concat', 'mul', 'elementwise_add',
+            'cross_entropy', 'mean', 'fill_constant', 'mean_grad',
+            'cross_entropy_grad', 'elementwise_add_grad', 'send', 'mul_grad',
+            'send', 'concat_grad', 'sequence_pool_grad', 'lookup_table_grad',
+            'split_selected_rows', 'send', 'sequence_pool_grad',
+            'lookup_table_grad', 'sequence_pool_grad', 'lookup_table_grad',
+            'sum', 'split_selected_rows', 'send', 'send_barrier', 'recv',
+            'recv', 'fetch_barrier'
+        ]
+        self.assertEqual([op.type for op in trainer.blocks[0].ops], ops)
 
 
 if __name__ == "__main__":
